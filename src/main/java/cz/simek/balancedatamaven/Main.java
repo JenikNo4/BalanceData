@@ -26,6 +26,7 @@ import weka.filters.supervised.instance.SMOTE;
 import weka.filters.supervised.instance.SpreadSubsample;
 import weka.filters.unsupervised.attribute.NumericToNominal;
 
+import javax.xml.crypto.Data;
 import java.io.InputStream;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -37,13 +38,8 @@ public class Main {
     public static Metadata metaFeature = new MetadataBuilder().putString("machine_learning", "FEATURE").putStringArray("custom", new String[]{"test1", "test2"}).build();
 
 
-    public static void main(String[] args) throws Exception {
-//        weka();
-        //        Dataset<Row> rowDataset = sparkSession().read().option("inferSchema", "true").csv("src/main/resources/pima-indians-diabetes.csv");
-        Dataset<Row> rowDataset = sparkSession().read().option("inferSchema", "false").csv("src/main/resources/glass.csv");
-        long allRecords = rowDataset.count();
-        String categoryColumnName = "_c9";
 
+    private static Dataset<Row> oversampleDataset(Dataset<Row> rowDataset, String categoryColumnName){
         List<Row> categoriesFrequency = rowDataset.groupBy(categoryColumnName).count().orderBy(desc("count")).collectAsList();
         Long max = (long) categoriesFrequency.get(0).get(1);
         System.out.println("MAX: "+max);
@@ -61,9 +57,18 @@ public class Main {
             }
             allRows.addAll(allCategoryRows);
         });
-
         Dataset<Row> allRowsDataset = sparkSession().createDataFrame(allRows, rowDataset.schema());
         Dataset<Row> rowDatasetUnion = rowDataset.unionAll(allRowsDataset);
+        return rowDatasetUnion;
+    }
+
+    public static void main(String[] args) throws Exception {
+//        weka();
+        //        Dataset<Row> rowDataset = sparkSession().read().option("inferSchema", "true").csv("src/main/resources/pima-indians-diabetes.csv");
+        Dataset<Row> rowDataset = sparkSession().read().option("inferSchema", "false").csv("src/main/resources/glass.csv");
+        String categoryColumnName = "_c9";
+
+        Dataset<Row> rowDatasetUnion = oversampleDataset(rowDataset, categoryColumnName);
         List<Row> count3 = rowDatasetUnion.groupBy(categoryColumnName).count().orderBy(desc("count")).collectAsList();
         count3.forEach(System.out::println);
 
@@ -73,12 +78,6 @@ public class Main {
 
 
         Long count1 = rowDataset.filter(col("_c9").equalTo(1)).count();
-
-        int howManyTake = max.intValue() - count1.intValue();
-
-
-        Dataset<Row> sample = rowDataset.filter(col("_c9").equalTo(1));
-        List<Row> rows1 = sample.toJavaRDD().takeSample(false, howManyTake);
 
 
 //        Dataset<Row> dataset = sparkSession().createDataFrame(rows1, rowDataset.schema());
