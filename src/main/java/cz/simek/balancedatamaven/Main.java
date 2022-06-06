@@ -62,151 +62,47 @@ public class Main {
         return rowDatasetUnion;
     }
 
+    private static Dataset<Row> undersampleDataset(Dataset<Row> rowDataset, String categoryColumnName){
+        List<Row> categoriesFrequency = rowDataset.groupBy(categoryColumnName).count().orderBy(asc("count")).collectAsList();
+        Long min = (long) categoriesFrequency.get(0).get(1);
+        System.out.println("Min: " + min);
+        categoriesFrequency.forEach(System.out::println);
+
+        List<Row> allRows = new ArrayList<>();
+        categoriesFrequency.forEach(categories -> {
+            Dataset<Row> categorySample = rowDataset.filter(col(categoryColumnName).equalTo(categories.get(0)));
+            long samples = min;
+            List<Row> allCategoryRows = new ArrayList<>();
+            List<Row> rows1 = categorySample.toJavaRDD().takeSample(false, (int) samples);
+            allCategoryRows.addAll(rows1);
+
+            allRows.addAll(allCategoryRows);
+        });
+        Dataset<Row> allRowsDataset = sparkSession().createDataFrame(allRows, rowDataset.schema());
+        return allRowsDataset;
+    }
+
     public static void main(String[] args) throws Exception {
 //        weka();
-        //        Dataset<Row> rowDataset = sparkSession().read().option("inferSchema", "true").csv("src/main/resources/pima-indians-diabetes.csv");
+//        Dataset<Row> rowDataset = sparkSession().read().option("inferSchema", "true").csv("src/main/resources/pima-indians-diabetes.csv");
         Dataset<Row> rowDataset = sparkSession().read().option("inferSchema", "false").csv("src/main/resources/glass.csv");
         String categoryColumnName = "_c9";
 
         Dataset<Row> rowDatasetUnion = oversampleDataset(rowDataset, categoryColumnName);
         List<Row> count3 = rowDatasetUnion.groupBy(categoryColumnName).count().orderBy(desc("count")).collectAsList();
+
+        Dataset<Row> rowDataset1 = undersampleDataset(rowDataset, categoryColumnName);
+        List<Row> count4 = rowDataset1.groupBy(categoryColumnName).count().orderBy(desc("count")).collectAsList();
+
+        rowDatasetUnion.foreach(row -> {
+            System.out.println(row);
+        });
+
+        rowDataset1.foreach(row -> {
+            System.out.println(row);
+        });
         count3.forEach(System.out::println);
-
-
-
-
-
-
-        Long count1 = rowDataset.filter(col("_c9").equalTo(1)).count();
-
-
-//        Dataset<Row> dataset = sparkSession().createDataFrame(rows1, rowDataset.schema());
-//        Dataset<Row> rowDatasetUnion = rowDataset.unionAll(dataset);
-//        long count2 = rowDatasetUnion.count();
-//        rowDataset.filter(col("_c9").equalTo(1)).count();
-
-
-        List<Row> rows = rowDataset.groupBy("_c9").count().orderBy("_c9").collectAsList();
-        long rowDataCount = rowDataset.count();
-        long countCategories = rows.stream().count();
-
-        Map<String, Double> fraction = new HashMap<>();
-
-//        for (Row row : rows)
-//        {
-//            String o1 = (String) row.get(0);
-//            Long o = (Long) row.get(1);
-//
-////            fraction.put(o1, o.doubleValue()/Long.valueOf(rowDataCount).doubleValue());
-//            System.out.println();
-//        }
-//
-        fraction.put("1", 1D);
-        fraction.put("2", 1D);
-        fraction.put("3", 1D);
-        fraction.put("4", 1D);
-        fraction.put("5", 2D);
-        fraction.put("6", 3D);
-        fraction.put("7", 1D);
-
-//        rowDataset.sampleByKey();
-        Dataset<Row> sampled = rowDataset.stat().sampleBy("_c9", fraction, 0L);
-        List<Row> sampledRows = rowDataset.groupBy("_c9").count().orderBy("_c9").collectAsList();
-
-        List<Row> sampledList = sampled.collectAsList();
-
-        long count = sampled.count();
-
-//        rowDataset.
-//
-//        DataSource.read();
-
-
-        Dataset<Row> rowDataset_a = rowDataset.filter(rowDataset.col("_c9").isin(0));
-        Dataset<Row> rowDataset_b = rowDataset.filter(rowDataset.col("_c9").isin(1));
-        Dataset<Row> minorityClass;
-        Dataset<Row> majorityClass;
-
-        long dasetSize = rowDataset.count();
-
-        double overSamplingBalancingRation;
-        if (rowDataset_a.count() > rowDataset_b.count()) {
-
-            overSamplingBalancingRation = (double) (dasetSize - rowDataset_b.count()) / dasetSize;
-            majorityClass = rowDataset_a;
-            minorityClass = rowDataset_b;
-        } else {
-            overSamplingBalancingRation = (double) (dasetSize - rowDataset_a.count()) / dasetSize;
-            majorityClass = rowDataset_b;
-            minorityClass = rowDataset_a;
-        }
-
-//        double ratio = (double) rowDataset_a.count() / rowDataset_b.count();
-//        ratio = Math.ceil(ratio);
-        System.out.println(overSamplingBalancingRation);
-
-        double ratio = (double) majorityClass.count() / (double) minorityClass.count();
-
-        Dataset<Row> df_b_oversampled = minorityClass.sample(true, Math.ceil((ratio * 10) / 10));
-        Dataset<Row> unionAll = majorityClass.unionAll(df_b_oversampled);
-        System.out.println("OversampledSpark");
-//        Dataset<Row> c8 = resampleDataset(rowDataset, 0, "_c8", "0", "1");
-        System.out.println("Nuly: " + unionAll.filter(rowDataset.col("_c8").isin(0)).count());
-        System.out.println("Jednicky: " + unionAll.filter(rowDataset.col("_c8").isin(1)).count());
-
-
-        long minorityCount = minorityClass.count();
-        long minorityCountDistinct = minorityClass.distinct().count();
-        long OverSampledCount = df_b_oversampled.count();
-        long OverSampledCountDistinct = df_b_oversampled.distinct().count();
-
-
-        double underSamplingBalancingRation;
-        if (rowDataset_a.count() > rowDataset_b.count()) {
-
-            underSamplingBalancingRation = (double) (dasetSize - rowDataset_a.count()) / dasetSize;
-            majorityClass = rowDataset_a;
-            minorityClass = rowDataset_b;
-        } else {
-            underSamplingBalancingRation = (double) (dasetSize - rowDataset_b.count()) / dasetSize;
-            majorityClass = rowDataset_b;
-            minorityClass = rowDataset_a;
-        }
-
-        System.out.println(underSamplingBalancingRation);
-        Dataset<Row> df_b_undersample = majorityClass.sample(false, 1 / (Math.ceil(ratio * 10) / 10));
-
-        System.out.println("UndersampledSpark");
-//        Dataset<Row> c8 = resampleDataset(rowDataset, 0, "_c8", "0", "1");
-        System.out.println("Nuly: " + unionAll.filter(rowDataset.col("_c8").isin(0)).count());
-        System.out.println("Jednicky: " + unionAll.filter(rowDataset.col("_c8").isin(1)).count());
-
-
-        long majorityCount = majorityClass.count();
-        long majorityCountDistinct = majorityClass.distinct().count();
-        long UnderSampledCount = df_b_undersample.count();
-        long UnderSampledCountDistinct = df_b_undersample.distinct().count();
-
-
-        System.out.println("minorityCount: " + minorityCount);
-        System.out.println("minorityCountDistinct: " + minorityCountDistinct);
-        System.out.println("OverSampledCount: " + OverSampledCount);
-        System.out.println("OverSampledCountDistinct: " + OverSampledCountDistinct);
-
-        System.out.println();
-
-        System.out.println("majorityCount: " + majorityCount);
-        System.out.println("majorityCountDistinct: " + majorityCountDistinct);
-        System.out.println("UnderSampledCount: " + UnderSampledCount);
-        System.out.println("UnderSampledCountDistinct: " + UnderSampledCountDistinct);
-
-        System.out.println();
-
-
-//        DataSource dataSource = new DataSource();
-
-//        DataSource sourceDataset = new DataSource();
-
+        count4.forEach(System.out::println);
 
     }
 
