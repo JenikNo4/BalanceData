@@ -1,24 +1,12 @@
 package cz.simek.balancedatamaven;
 
-import au.com.bytecode.opencsv.CSVParser;
-import com.google.common.collect.ImmutableMap;
-import com.sgcharts.sparkutil.Smote;
-import org.apache.commons.io.IOUtils;
-import org.apache.spark.api.java.function.FilterFunction;
-import org.apache.spark.mllib.util.MFDataGenerator;
-import org.apache.spark.rdd.RDD;
-import org.apache.spark.sql.Dataset;
-import org.apache.spark.sql.Encoders;
-import org.apache.spark.sql.Row;
-import org.apache.spark.sql.SparkSession;
+import org.apache.commons.compress.archivers.ar.ArArchiveEntry;
+import org.apache.spark.api.java.JavaRDD;
+import org.apache.spark.internal.config.R;
+import org.apache.spark.sql.*;
 import org.apache.spark.sql.catalyst.expressions.GenericRowWithSchema;
-import org.apache.spark.sql.streaming.DataStreamWriter;
-import org.apache.spark.sql.streaming.StreamingQuery;
 import org.apache.spark.sql.types.*;
-import org.apache.spark.util.random.RandomSampler$;
-import scala.collection.Seq;
 import weka.core.Instances;
-import weka.core.RandomSample;
 import weka.core.converters.ConverterUtils.DataSource;
 import weka.filters.Filter;
 import weka.filters.supervised.instance.Resample;
@@ -26,10 +14,8 @@ import weka.filters.supervised.instance.SMOTE;
 import weka.filters.supervised.instance.SpreadSubsample;
 import weka.filters.unsupervised.attribute.NumericToNominal;
 
-import javax.xml.crypto.Data;
-import java.io.InputStream;
 import java.util.*;
-import java.util.stream.Collectors;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static java.rmi.server.LogStream.log;
 import static org.apache.spark.sql.functions.*;
@@ -38,11 +24,49 @@ public class Main {
     public static Metadata metaFeature = new MetadataBuilder().putString("machine_learning", "FEATURE").putStringArray("custom", new String[]{"test1", "test2"}).build();
 
 
-
-    private static Dataset<Row> oversampleDataset(Dataset<Row> rowDataset, String categoryColumnName){
+    private static Dataset<Row> oversampleDatasetV2(Dataset<Row> rowDataset, String categoryColumnName) {
         List<Row> categoriesFrequency = rowDataset.groupBy(categoryColumnName).count().orderBy(desc("count")).collectAsList();
         Long max = (long) categoriesFrequency.get(0).get(1);
-        System.out.println("MAX: "+max);
+        System.out.println("MAX: " + max);
+        categoriesFrequency.forEach(System.out::println);
+
+        List<Dataset<Row>> finalListOfDataset = new ArrayList<>();
+        List<Dataset<Row>> listOfDataset = new ArrayList<>();
+
+        for (Row categories : categoriesFrequency) {
+            Dataset<Row> categorySample = rowDataset.filter(col(categoryColumnName).equalTo(categories.get(0)));
+            long samples = max % (long) categories.get(1);
+            long howManyTimes = max / (long) categories.get(1);
+            List<Row> restRows = new ArrayList<>();
+            for (int x = 0; x < howManyTimes - 1; x++) {
+                listOfDataset.add(categorySample.sample(1D));
+//                categorySample = categorySample.unionAll();
+            }
+            if (samples > 0) {
+                restRows = categorySample.toJavaRDD().takeSample(false, (int) samples);
+            }
+
+            Dataset<Row> dataFrame = sparkSession().createDataFrame(restRows, rowDataset.schema());
+            listOfDataset.add(dataFrame);
+
+        }
+        if (finalListOfDataset.isEmpty()) {
+            finalListOfDataset.add(listOfDataset.get(0).unionAll(listOfDataset.get(1)));
+        }
+
+        for (int y = 2; y < listOfDataset.size(); y++) {
+            finalListOfDataset.add(finalListOfDataset.get(y - 2).unionAll(listOfDataset.get(y)));
+        }
+        Dataset<Row> finalDataset = finalListOfDataset.get(finalListOfDataset.size() - 1);
+
+        return finalDataset.unionAll(rowDataset);
+    }
+
+
+    private static Dataset<Row> oversampleDataset(Dataset<Row> rowDataset, String categoryColumnName) {
+        List<Row> categoriesFrequency = rowDataset.groupBy(categoryColumnName).count().orderBy(desc("count")).collectAsList();
+        Long max = (long) categoriesFrequency.get(0).get(1);
+        System.out.println("MAX: " + max);
         categoriesFrequency.forEach(System.out::println);
 
         List<Row> allRows = new ArrayList<>();
@@ -50,10 +74,10 @@ public class Main {
             Dataset<Row> categorySample = rowDataset.filter(col(categoryColumnName).equalTo(categories.get(0)));
             long samples = max - (long) categories.get(1);
             List<Row> allCategoryRows = new ArrayList<>();
-            while(samples != 0){
+            while (samples != 0) {
                 List<Row> rows1 = categorySample.toJavaRDD().takeSample(false, (int) samples);
                 allCategoryRows.addAll(rows1);
-                samples = samples-rows1.stream().count();
+                samples = samples - rows1.stream().count();
             }
             allRows.addAll(allCategoryRows);
         });
@@ -62,7 +86,7 @@ public class Main {
         return rowDatasetUnion;
     }
 
-    private static Dataset<Row> undersampleDataset(Dataset<Row> rowDataset, String categoryColumnName){
+    private static Dataset<Row> undersampleDataset(Dataset<Row> rowDataset, String categoryColumnName) {
         List<Row> categoriesFrequency = rowDataset.groupBy(categoryColumnName).count().orderBy(asc("count")).collectAsList();
         Long min = (long) categoriesFrequency.get(0).get(1);
         System.out.println("Min: " + min);
@@ -85,24 +109,223 @@ public class Main {
     public static void main(String[] args) throws Exception {
 //        weka();
 //        Dataset<Row> rowDataset = sparkSession().read().option("inferSchema", "true").csv("src/main/resources/pima-indians-diabetes.csv");
-        Dataset<Row> rowDataset = sparkSession().read().option("inferSchema", "false").csv("src/main/resources/glass.csv");
+        String[] paths = new String[]{"src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
+                "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv"};
+        Dataset<Row> rowDataset = sparkSession().read().option("inferSchema", "false").csv(paths);
         String categoryColumnName = "_c9";
 
-        Dataset<Row> rowDatasetUnion = oversampleDataset(rowDataset, categoryColumnName);
-        List<Row> count3 = rowDatasetUnion.groupBy(categoryColumnName).count().orderBy(desc("count")).collectAsList();
+        Dataset<Row> describe = rowDataset.describe("_c9");
 
-        Dataset<Row> rowDataset1 = undersampleDataset(rowDataset, categoryColumnName);
-        List<Row> count4 = rowDataset1.groupBy(categoryColumnName).count().orderBy(desc("count")).collectAsList();
 
-        rowDatasetUnion.foreach(row -> {
-            System.out.println(row);
-        });
+        describe.show();
+        JavaRDD<Vector> mat = null;
 
-        rowDataset1.foreach(row -> {
-            System.out.println(row);
-        });
-        count3.forEach(System.out::println);
-        count4.forEach(System.out::println);
+// Compute column summary statistics.
+//        MultivariateStatisticalSummary summary = Statistics.colStats(mat.rdd());
+//        System.out.println(summary.mean()); // a dense vector containing the mean value for each column
+//        System.out.println(summary.variance()); // column-wise variance
+//        System.out.println(summary.numNonzeros()); // number of nonzeros in each column
+
+        Dataset<Row> rowDatasetUnionV2 = oversampleDatasetV2(rowDataset, categoryColumnName);
+        Dataset<Row> describe1 = rowDatasetUnionV2.describe();
+        describe1.show();
+        List<Row> count5 = rowDatasetUnionV2.groupBy(categoryColumnName).count().orderBy(desc("count")).collectAsList();
+
+//        Dataset<Row> rowDatasetUnion = oversampleDataset(rowDataset, categoryColumnName);
+//        List<Row> count3 = rowDatasetUnion.groupBy(categoryColumnName).count().orderBy(desc("count")).collectAsList();
+//
+//        Dataset<Row> rowDataset1 = undersampleDataset(rowDataset, categoryColumnName);
+//        List<Row> count4 = rowDataset1.groupBy(categoryColumnName).count().orderBy(desc("count")).collectAsList();
+
+//        rowDatasetUnion.foreach(row -> {
+//            System.out.println(row);
+//        });
+//
+//        rowDataset1.foreach(row -> {
+//            System.out.println(row);
+//        });
+//        count3.forEach(System.out::println);
+//        count4.forEach(System.out::println);
+        count5.forEach(System.out::println);
 
     }
 
