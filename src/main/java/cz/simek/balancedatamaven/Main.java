@@ -1,11 +1,12 @@
 package cz.simek.balancedatamaven;
 
-import org.apache.commons.compress.archivers.ar.ArArchiveEntry;
-import org.apache.spark.api.java.JavaRDD;
-import org.apache.spark.internal.config.R;
-import org.apache.spark.sql.*;
+import org.apache.spark.api.java.JavaPairRDD;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.expressions.GenericRowWithSchema;
 import org.apache.spark.sql.types.*;
+import scala.Tuple2;
 import weka.core.Instances;
 import weka.core.converters.ConverterUtils.DataSource;
 import weka.filters.Filter;
@@ -24,66 +25,176 @@ public class Main {
     public static Metadata metaFeature = new MetadataBuilder().putString("machine_learning", "FEATURE").putStringArray("custom", new String[]{"test1", "test2"}).build();
 
 
-    private static Dataset<Row> oversampleDatasetV2(Dataset<Row> rowDataset, String categoryColumnName) {
-        List<Row> categoriesFrequency = rowDataset.groupBy(categoryColumnName).count().orderBy(desc("count")).collectAsList();
-        Long max = (long) categoriesFrequency.get(0).get(1);
-        System.out.println("MAX: " + max);
-        categoriesFrequency.forEach(System.out::println);
 
-        List<Dataset<Row>> finalListOfDataset = new ArrayList<>();
-        List<Dataset<Row>> listOfDataset = new ArrayList<>();
 
-        for (Row categories : categoriesFrequency) {
-            Dataset<Row> categorySample = rowDataset.filter(col(categoryColumnName).equalTo(categories.get(0)));
-            long samples = max % (long) categories.get(1);
-            long howManyTimes = max / (long) categories.get(1);
+    private static SizedDataset power(Dataset<Row> input, long inputSize, long max) {
+        SizedDataset result = new SizedDataset(input, inputSize);
+
+        if (inputSize >= max) {
+            return result;
+        }
+
+        do {
+            result = new SizedDataset(result.getDataset().unionAll(result.getDataset()), result.getSize() * 2);
+        }
+        while (result.getSize() < max);
+
+        return result;
+    }
+
+    /**
+     * //original David with no computing - inaccurate
+     * @param baseDataset
+     * @param categoryColumnName
+     * @return
+     */
+    private static Dataset<Row> overSampleDatasetV2(Dataset<Row> baseDataset, String categoryColumnName) {
+        //original David with no computing - inaccurate
+        final int CATEGORY_COLUMN_INDEX = 0;
+        final String COUNT_FIELD = "count";
+
+        if (baseDataset.isEmpty()) {
+            return baseDataset;
+        }
+
+        Dataset<Row> categoriesFrequency = baseDataset.groupBy(categoryColumnName).count().as(COUNT_FIELD).orderBy(desc(COUNT_FIELD));
+        long max = categoriesFrequency.head().getAs(COUNT_FIELD);
+        categoriesFrequency.show();
+        // has to be final or effectively final
+        final AtomicReference<Dataset<Row>> result = new AtomicReference<>(baseDataset.limit(0)); // start with an empty dataset
+
+        categoriesFrequency.toLocalIterator().forEachRemaining(categories -> {
+            Object categoryValue = categories.get(CATEGORY_COLUMN_INDEX);
+            long categoryCount = categories.getAs(COUNT_FIELD);
+
+            Dataset<Row> categoryDataset = baseDataset.filter(col(categoryColumnName).equalTo(lit(categoryValue)));
+
+            SizedDataset categoryOverSampled = power(categoryDataset, categoryCount, max);
+            Dataset<Row> overSampledDataset = categoryOverSampled.getDataset().sample(1.0D * max / categoryOverSampled.getSize());
+
+            result.set(result.get().unionAll(overSampledDataset));
+        });
+
+        return result.get();
+    }
+
+    private static class SizedDataset {
+        private final Dataset<Row> dataset;
+        private final long size;
+
+        SizedDataset(Dataset<Row> dataset, long size) {
+            this.dataset = dataset;
+            this.size = size;
+        }
+
+        public Dataset<Row> getDataset() {
+            return dataset;
+        }
+
+        public long getSize() {
+            return size;
+        }
+    }
+
+    /**
+     * //original David solution with computing adds and removing, accurate
+     *input 10_980_000
+     * 4:23 minutes
+     * 27_152_944 records
+     *
+     * @param baseDataset
+     * @param categoryColumnName
+     * @return
+     */
+    private static Dataset<Row> overSampleDatasetV4(Dataset<Row> baseDataset, String categoryColumnName) {
+        //original David solution with computing adds and removing
+        final int CATEGORY_COLUMN_INDEX = 0;
+        final String COUNT_FIELD = "count";
+
+        if (baseDataset.isEmpty()) {
+            return baseDataset;
+        }
+
+        Dataset<Row> categoriesFrequency = baseDataset.groupBy(categoryColumnName).count().as(COUNT_FIELD).orderBy(desc(COUNT_FIELD));
+        long max = categoriesFrequency.head().getAs(COUNT_FIELD);
+
+        // has to be final or effectively final
+        final AtomicReference<Dataset<Row>> result = new AtomicReference<>(baseDataset.limit(0)); // start with an empty dataset
+
+        categoriesFrequency.toLocalIterator().forEachRemaining(categories -> {
+            Object categoryValue = categories.get(CATEGORY_COLUMN_INDEX);
+            long categoryCount = categories.getAs(COUNT_FIELD);
+
+            Dataset<Row> categoryDataset = baseDataset.filter(col(categoryColumnName).equalTo(lit(categoryValue)));
+
+            SizedDataset categoryOverSampled = power(categoryDataset, categoryCount, max);
+            Dataset<Row> overSampledDataset = categoryOverSampled.getDataset().sample(1.0D * max / categoryOverSampled.getSize());
+            long count = overSampledDataset.count();
             List<Row> restRows = new ArrayList<>();
-            for (int x = 0; x < howManyTimes - 1; x++) {
-                listOfDataset.add(categorySample.sample(1D));
-//                categorySample = categorySample.unionAll();
+            if (count < max) {
+                System.out.println("je to mensi");
+                long l = max - count;
+                restRows = categoryDataset.toJavaRDD().takeSample(false, (int) l);
+                Dataset<Row> restRowsDataframe = sparkSession().createDataFrame(restRows, baseDataset.schema());
+                result.set(result.get().unionAll(restRowsDataframe));
+                result.set(result.get().unionAll(overSampledDataset));
+            } else if (max < count) {
+                System.out.println("je to vetsi");
+                result.set(result.get().unionAll(overSampledDataset.limit((int) max)));
+            }else {
+                System.out.println("je to stejny");
+                result.set(result.get().unionAll(overSampledDataset));
             }
-            if (samples > 0) {
-                restRows = categorySample.toJavaRDD().takeSample(false, (int) samples);
-            }
+        });
 
-            Dataset<Row> dataFrame = sparkSession().createDataFrame(restRows, rowDataset.schema());
-            listOfDataset.add(dataFrame);
-
-        }
-        if (finalListOfDataset.isEmpty()) {
-            finalListOfDataset.add(listOfDataset.get(0).unionAll(listOfDataset.get(1)));
-        }
-
-        for (int y = 2; y < listOfDataset.size(); y++) {
-            finalListOfDataset.add(finalListOfDataset.get(y - 2).unionAll(listOfDataset.get(y)));
-        }
-        Dataset<Row> finalDataset = finalListOfDataset.get(finalListOfDataset.size() - 1);
-
-        return finalDataset.unionAll(rowDataset);
+        return result.get();
     }
 
 
-    private static Dataset<Row> oversampleDataset(Dataset<Row> rowDataset, String categoryColumnName) {
-        List<Row> categoriesFrequency = rowDataset.groupBy(categoryColumnName).count().orderBy(desc("count")).collectAsList();
-        Long max = (long) categoriesFrequency.get(0).get(1);
-        System.out.println("MAX: " + max);
-        categoriesFrequency.forEach(System.out::println);
+    /**
+     * //My solution with exponencial increasing dataset, then plus dataset, then add remaining rows
+     *
+     * input 10_980_000
+     * 4:08 minutes
+     * 27_152_944 records
+     *
+     *
+     * @param baseDataset
+     * @param categoryColumnName
+     * @return
+     */
+    private static Dataset<Row> overSampleDatasetV1(Dataset<Row> baseDataset, String categoryColumnName) {
+        //My solution with exponencial increasing dataset, then plus dataset, then add remaining rows
+        //V1
+        Dataset<Row> categoriesFrequency = baseDataset.groupBy(categoryColumnName).count().as("count").orderBy(desc("count"));
+        long max = categoriesFrequency.head().getAs("count");
+        final AtomicReference<Dataset<Row>> finalDataset = new AtomicReference<>(baseDataset.limit(0)); // start with an empty dataset
 
-        List<Row> allRows = new ArrayList<>();
-        categoriesFrequency.forEach(categories -> {
-            Dataset<Row> categorySample = rowDataset.filter(col(categoryColumnName).equalTo(categories.get(0)));
-            long samples = max - (long) categories.get(1);
-            List<Row> allCategoryRows = new ArrayList<>();
-            while (samples != 0) {
-                List<Row> rows1 = categorySample.toJavaRDD().takeSample(false, (int) samples);
-                allCategoryRows.addAll(rows1);
-                samples = samples - rows1.stream().count();
+        categoriesFrequency.toLocalIterator().forEachRemaining(categories -> {
+            Dataset<Row> categoryDataset = baseDataset.filter(col(categoryColumnName).equalTo(categories.get(0)));
+            final AtomicReference<Dataset<Row>> finalCategoryDataSet = new AtomicReference<>(categoryDataset);
+            long finalCategoryCount = (long) categories.get(1);
+            long samples = max % (long) categories.get(1);
+            long howManyTimes = max / (long) categories.get(1);
+
+            for (int i = 0; (finalCategoryCount * 2) < max; i++) {
+                finalCategoryDataSet.set(finalCategoryDataSet.get().unionAll(finalCategoryDataSet.get()));
+                finalCategoryCount = finalCategoryCount * 2;
             }
-            allRows.addAll(allCategoryRows);
+            for (int i = 0; (finalCategoryCount + (long) categories.get(1)) <= max; i++) {
+                finalCategoryDataSet.set(finalCategoryDataSet.get().unionAll(categoryDataset));
+                finalCategoryCount = finalCategoryCount + (long) categories.get(1);
+            }
+            finalDataset.set(finalDataset.get().unionAll(finalCategoryDataSet.get()));
+            List<Row> restRows = new ArrayList<>();
+            if (samples > 0) {
+                restRows = categoryDataset.toJavaRDD().takeSample(false, (int) samples);
+            }
+            Dataset<Row> restRowsDataframe = sparkSession().createDataFrame(restRows, baseDataset.schema());
+            finalDataset.set(finalDataset.get().unionAll(restRowsDataframe));
         });
-        Dataset<Row> allRowsDataset = sparkSession().createDataFrame(allRows, rowDataset.schema());
-        Dataset<Row> rowDatasetUnion = rowDataset.unionAll(allRowsDataset);
-        return rowDatasetUnion;
+
+        return finalDataset.get();
     }
 
     private static Dataset<Row> undersampleDataset(Dataset<Row> rowDataset, String categoryColumnName) {
@@ -106,44 +217,12 @@ public class Main {
         return allRowsDataset;
     }
 
-    private static Dataset<Row> undersampleDatasetV2(Dataset<Row> rowDataset, String categoryColumnName) {
-        List<Row> categoriesFrequency = rowDataset.groupBy(categoryColumnName).count().orderBy(asc("count")).collectAsList();
-        Long min = (long) categoriesFrequency.get(0).get(1);
-        System.out.println("Min: " + min);
-        categoriesFrequency.forEach(System.out::println);
 
-        List<Dataset<Row>> finalListOfDataset = new ArrayList<>();
-        List<Dataset<Row>> listOfDataset = new ArrayList<>();
-
-        categoriesFrequency.forEach(categories -> {
-            Dataset<Row> categorySample = rowDataset.filter(col(categoryColumnName).equalTo(categories.get(0)));
-            Dataset<Row> sampledCategoryDataset = categorySample.sample(min / categorySample.count());
-            listOfDataset.add(sampledCategoryDataset);
-            long count = sampledCategoryDataset.count();
-            if (count < min) {
-                List<Row> restRows = categorySample.toJavaRDD().takeSample(false, (int) (min - count));
-                Dataset<Row> restRowsDataSet = sparkSession().createDataFrame(restRows, rowDataset.schema());
-                listOfDataset.add(restRowsDataSet);
-            } else if (count > min) {
-                System.out.println();
-            }
-
-        });
-
-        finalListOfDataset.add(listOfDataset.get(0).unionAll(listOfDataset.get(1)));
-
-        for (int y = 2; y < listOfDataset.size(); y++) {
-            finalListOfDataset.add(finalListOfDataset.get(y - 2).unionAll(listOfDataset.get(y)));
-        }
-        Dataset<Row> finalDataset = finalListOfDataset.get(finalListOfDataset.size() - 1);
-
-        return finalDataset;
-    }
 
     public static void main(String[] args) throws Exception {
 //        weka();
 //        Dataset<Row> rowDataset = sparkSession().read().option("inferSchema", "true").csv("src/main/resources/pima-indians-diabetes.csv");
-
+        sparkSession().sparkContext().setLogLevel("WARN");
         Dataset<Row> rowDataset = sparkSession().read().option("inferSchema", "false").csv(paths);
         String categoryColumnName = "_c9";
 // Compute column summary statistics.
@@ -152,10 +231,20 @@ public class Main {
 //        System.out.println(summary.variance()); // column-wise variance
 //        System.out.println(summary.numNonzeros()); // number of nonzeros in each column
 
-        Dataset<Row> rowDatasetUnionV2 = undersampleDatasetV2(rowDataset, categoryColumnName);
-        Dataset<Row> describe1 = rowDatasetUnionV2.describe();
-        describe1.show();
-        List<Row> count5 = rowDatasetUnionV2.groupBy(categoryColumnName).count().orderBy(desc("count")).collectAsList();
+
+//        Dataset<Row> rowDatasetUnionV3 = overSampleDataset(rowDataset, categoryColumnName);
+        Dataset<Row> rowDatasetUnionV3 = overSampleDatasetV4(rowDataset, categoryColumnName);
+
+        System.out.println("done");
+//        Dataset<Row> describe1 = rowDatasetUnionV2.describe();
+//        describe1.show();
+//        Dataset<Row> count5 = rowDatasetUnionV3.groupBy(categoryColumnName).count().orderBy(desc("count"));
+//        Dataset<Row> countOrig = rowDataset.groupBy(categoryColumnName).count().orderBy(desc("count"));
+//        count5.toLocalIterator().forEachRemaining(System.out::println);
+//        System.out.println("Original");
+//        countOrig.show();
+//        System.out.println(rowDataset.count());
+//        count5.show();
 
 //        Dataset<Row> rowDatasetUnion = oversampleDataset(rowDataset, categoryColumnName);
 //        List<Row> count3 = rowDatasetUnion.groupBy(categoryColumnName).count().orderBy(desc("count")).collectAsList();
@@ -172,49 +261,13 @@ public class Main {
 //        });
 //        count3.forEach(System.out::println);
 //        count4.forEach(System.out::println);
-        count5.forEach(System.out::println);
+
 
     }
-
-    public static Dataset<Row> generalTestDatasetWithManyDecimals() {
-        SparkSession spark = sparkSession();
-
-        StructField f01 = new StructField("f01", DataTypes.StringType, true, metaFeature);
-        StructField f02 = new StructField("f02", DataTypes.StringType, true, metaFeature);
-        StructType schema = new StructType(new StructField[]{f01, f02});
-
-        Row row1 = new GenericRowWithSchema(new Object[]{"-1", "0"}, schema);
-        Row row2 = new GenericRowWithSchema(new Object[]{"-1.", "0."}, schema);
-        Row row3 = new GenericRowWithSchema(new Object[]{"-1.501490", "0.797"}, schema);
-        Row row4 = new GenericRowWithSchema(new Object[]{"-1.501490389", "0.797980"}, schema);
-        Row row5 = new GenericRowWithSchema(new Object[]{"-1.501490389867", "0.797980948"}, schema);
-        Row row6 = new GenericRowWithSchema(new Object[]{"-1.501490389867235", "0.797980948857"}, schema);
-        Row row7 = new GenericRowWithSchema(new Object[]{"-1.501490389867235824", "0.797980948857494"}, schema);
-        Row row8 = new GenericRowWithSchema(new Object[]{"-1.501490389867235824548", "0.79798094885749435894"}, schema);
-
-        List<Row> rows = Arrays.asList(row1, row2, row3, row4, row5, row6, row7, row8);
-        return spark.createDataFrame(rows, schema);
-    }
-
     public static SparkSession sparkSession() {
         SparkSession sparkSession = SparkSession.builder().master("local[2]").getOrCreate();
         return sparkSession;
     }
-
-    private static Dataset<Row> resampleDataset(Dataset<Row> base, double ratio, String class_column, String key, String secondKey) {
-        Dataset<Row> datasetGroupA = base.filter(base.col(class_column).isin(key));
-        Dataset<Row> datasetGroupB = base.filter(base.col(class_column).isin(secondKey));
-
-        long totalCountA = datasetGroupA.count();
-        long totalCountB = datasetGroupB.count();
-        ratio = totalCountA / totalCountB;
-
-        double fraction = totalCountA * ratio / totalCountB;
-        Dataset<Row> sampled = datasetGroupB.sample(false, fraction);
-        return sampled.unionAll(datasetGroupA);
-
-    }
-
     public static void weka() throws Exception {
         System.out.println("hello");
 //        DataSource source = new DataSource("pima-indians-diabetes.csv");
@@ -324,6 +377,30 @@ public class Main {
 
 
     }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     static String[] paths = new String[]{"src/main/resources/glass.csv"
             , "src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv","src/main/resources/glass.csv",
