@@ -15,6 +15,8 @@ import weka.filters.supervised.instance.SMOTE;
 import weka.filters.supervised.instance.SpreadSubsample;
 import weka.filters.unsupervised.attribute.NumericToNominal;
 
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -24,6 +26,65 @@ import static org.apache.spark.sql.functions.*;
 public class Main {
     public static Metadata metaFeature = new MetadataBuilder().putString("machine_learning", "FEATURE").putStringArray("custom", new String[]{"test1", "test2"}).build();
 
+    public static void main(String[] args) throws Exception {
+//        weka();
+//        Dataset<Row> rowDataset = sparkSession().read().option("inferSchema", "true").csv("src/main/resources/pima-indians-diabetes.csv");
+        sparkSession().sparkContext().setLogLevel("WARN");
+        Dataset<Row> rowDataset = sparkSession().read().option("inferSchema", "false").csv(paths);
+        String categoryColumnName = "_c9";
+
+        DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss");
+        LocalDateTime now = LocalDateTime.now();
+        System.out.println(dtf.format(now));
+        Dataset<Row> categoriesFrequency = rowDataset.groupBy(categoryColumnName).count().as("count").orderBy(desc("count"));
+        now = LocalDateTime.now();
+        System.out.println(dtf.format(now));
+        categoriesFrequency.show();
+        now = LocalDateTime.now();
+        System.out.println(dtf.format(now));
+// Compute column summary statistics.
+//        MultivariateStatisticalSummary summary = Statistics.colStats(mat.rdd());
+//        System.out.println(summary.mean()); // a dense vector containing the mean value for each column
+//        System.out.println(summary.variance()); // column-wise variance
+//        System.out.println(summary.numNonzeros()); // number of nonzeros in each column
+
+
+        System.out.println("start oversampling");
+        now = LocalDateTime.now();
+        System.out.println(dtf.format(now));
+//        Dataset<Row> rowDatasetUnionV3 = overSampleDataset(rowDataset, categoryColumnName);
+        Dataset<Row> rowDatasetUnionV3 = overSampleDatasetV1(rowDataset, categoryColumnName);
+        System.out.println("endOfOversampling");
+        now = LocalDateTime.now();
+        System.out.println(dtf.format(now));
+        System.out.println("count Freq");
+        Dataset<Row> count5 = rowDatasetUnionV3.groupBy(categoryColumnName).count().as("count").orderBy(desc("count"));
+        count5.show();
+        now = LocalDateTime.now();
+        System.out.println(dtf.format(now));
+        System.out.println("done");
+
+//        Dataset<Row> describe1 = rowDatasetUnionV2.describe();
+//        describe1.show();
+
+//        Dataset<Row> rowDatasetUnion = oversampleDataset(rowDataset, categoryColumnName);
+//        List<Row> count3 = rowDatasetUnion.groupBy(categoryColumnName).count().orderBy(desc("count")).collectAsList();
+//
+//        Dataset<Row> rowDataset1 = undersampleDataset(rowDataset, categoryColumnName);
+//        List<Row> count4 = rowDataset1.groupBy(categoryColumnName).count().orderBy(desc("count")).collectAsList();
+
+//        rowDatasetUnion.foreach(row -> {
+//            System.out.println(row);
+//        });
+//
+//        rowDataset1.foreach(row -> {
+//            System.out.println(row);
+//        });
+//        count3.forEach(System.out::println);
+//        count4.forEach(System.out::println);
+
+
+    }
 
 
 
@@ -185,13 +246,13 @@ public class Main {
                 finalCategoryDataSet.set(finalCategoryDataSet.get().unionAll(categoryDataset));
                 finalCategoryCount = finalCategoryCount + (long) categories.get(1);
             }
-            finalDataset.set(finalDataset.get().unionAll(finalCategoryDataSet.get()));
-            List<Row> restRows = new ArrayList<>();
+
             if (samples > 0) {
-                restRows = categoryDataset.toJavaRDD().takeSample(false, (int) samples);
+                finalCategoryDataSet.set(finalCategoryDataSet.get().unionAll(finalCategoryDataSet.get().limit((int) samples)));
             }
-            Dataset<Row> restRowsDataframe = sparkSession().createDataFrame(restRows, baseDataset.schema());
-            finalDataset.set(finalDataset.get().unionAll(restRowsDataframe));
+//            Dataset<Row> restRowsDataframe = sparkSession().createDataFrame(restRows, baseDataset.schema());
+            finalDataset.set(finalDataset.get().unionAll(finalCategoryDataSet.get()));
+//            finalDataset.set(finalDataset.get().unionAll(restRowsDataframe));
         });
 
         return finalDataset.get();
@@ -219,51 +280,7 @@ public class Main {
 
 
 
-    public static void main(String[] args) throws Exception {
-//        weka();
-//        Dataset<Row> rowDataset = sparkSession().read().option("inferSchema", "true").csv("src/main/resources/pima-indians-diabetes.csv");
-        sparkSession().sparkContext().setLogLevel("WARN");
-        Dataset<Row> rowDataset = sparkSession().read().option("inferSchema", "false").csv(paths);
-        String categoryColumnName = "_c9";
-// Compute column summary statistics.
-//        MultivariateStatisticalSummary summary = Statistics.colStats(mat.rdd());
-//        System.out.println(summary.mean()); // a dense vector containing the mean value for each column
-//        System.out.println(summary.variance()); // column-wise variance
-//        System.out.println(summary.numNonzeros()); // number of nonzeros in each column
 
-
-//        Dataset<Row> rowDatasetUnionV3 = overSampleDataset(rowDataset, categoryColumnName);
-        Dataset<Row> rowDatasetUnionV3 = overSampleDatasetV4(rowDataset, categoryColumnName);
-
-        System.out.println("done");
-//        Dataset<Row> describe1 = rowDatasetUnionV2.describe();
-//        describe1.show();
-//        Dataset<Row> count5 = rowDatasetUnionV3.groupBy(categoryColumnName).count().orderBy(desc("count"));
-//        Dataset<Row> countOrig = rowDataset.groupBy(categoryColumnName).count().orderBy(desc("count"));
-//        count5.toLocalIterator().forEachRemaining(System.out::println);
-//        System.out.println("Original");
-//        countOrig.show();
-//        System.out.println(rowDataset.count());
-//        count5.show();
-
-//        Dataset<Row> rowDatasetUnion = oversampleDataset(rowDataset, categoryColumnName);
-//        List<Row> count3 = rowDatasetUnion.groupBy(categoryColumnName).count().orderBy(desc("count")).collectAsList();
-//
-//        Dataset<Row> rowDataset1 = undersampleDataset(rowDataset, categoryColumnName);
-//        List<Row> count4 = rowDataset1.groupBy(categoryColumnName).count().orderBy(desc("count")).collectAsList();
-
-//        rowDatasetUnion.foreach(row -> {
-//            System.out.println(row);
-//        });
-//
-//        rowDataset1.foreach(row -> {
-//            System.out.println(row);
-//        });
-//        count3.forEach(System.out::println);
-//        count4.forEach(System.out::println);
-
-
-    }
     public static SparkSession sparkSession() {
         SparkSession sparkSession = SparkSession.builder().master("local[2]").getOrCreate();
         return sparkSession;
