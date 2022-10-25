@@ -119,13 +119,13 @@ public class Main {
             long samples = max % (long) categories.get(1);
 
             JavaRDD<Row> finalRowJavaRDD = finalCategoryDataSet.get().toJavaRDD();
-            for (int i = 0; (finalCategoryCount * 2) < max; i++) {
+            while ((finalCategoryCount * 2) < max) {
                 finalRowJavaRDD = finalRowJavaRDD.union(finalRowJavaRDD);
                 finalCategoryCount = finalCategoryCount * 2;
             }
 
             JavaRDD<Row> categoryRowJavaRDD = categoryDataset.toJavaRDD();
-            for (int i = 0; (finalCategoryCount + (long) categories.get(1)) <= max; i++) {
+            while ((finalCategoryCount + (long) categories.get(1)) <= max) {
                 finalRowJavaRDD = finalRowJavaRDD.union(categoryRowJavaRDD);
                 finalCategoryCount = finalCategoryCount + (long) categories.get(1);
             }
