@@ -39,6 +39,16 @@
             <artifactId>spark-mllib_2.12</artifactId>
             <version>3.2.1</version>
         </dependency>
+        <dependency>
+            <groupId>io.spinnaker.keel</groupId>
+            <artifactId>keel-core</artifactId>
+            <version>1.1.2</version>
+        </dependency>
+        <dependency>
+            <groupId>org.tweetyproject</groupId>
+            <artifactId>tweety-full</artifactId>
+            <version>1.22</version>
+        </dependency>
         <!-- https://mvnrepository.com/artifact/com.sgcharts/spark-util -->
         <dependency>
             <groupId>com.sgcharts</groupId>
